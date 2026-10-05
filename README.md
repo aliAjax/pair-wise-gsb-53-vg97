@@ -32,6 +32,34 @@ python3 app.py --db ./data.db --port 8329
 - `GET /api/stats`：状态统计。
 - `POST /api/records`：创建记录，请求体为`{"reference":"...","data":{...}}`。
 - `POST /api/records/{id}/actions/{action}`：执行业务动作，请求体为`{"expected_version":1,"data":{...}}`。
+- `POST /api/records/{id}/judicial-stays`：登记/更新/撤销司法暂缓命令。
+- `POST /api/records/{id}/custody-reviews/{review_id}/decision`：处理羁押复核并按需追加下一次复核。
+
+案件详情会同时返回：
+
+- `judicial_basis`：当前命令、停表区间、办案期限原到期日、累计停表天数和调整后到期日。
+- `judicial_orders`：已成为当前依据的命令，按`(record_id, order_number)`唯一。
+- `judicial_discrepancies`：同一命令号重复、迟到旧命令等差异留痕。
+- `custody_reviews`：羁押复核时间线；命令更新只把`pending`复核置为`superseded`并重新计算，已有决定保留原命令依据。
+
+司法暂缓命令请求示例：
+
+```json
+{
+  "expected_version": 1,
+  "data": {
+    "order_number": "COURT-2026-001",
+    "order_type": "stay",
+    "issued_day": 120,
+    "received_day": 121,
+    "effective_day": 120,
+    "resume_day": 130,
+    "review_days": 7
+  }
+}
+```
+
+`order_type`取值为`stay`、`update`、`revoke`；`received_day`缺省等于`issued_day`，`effective_day`缺省等于`issued_day`。创建案件时可选传`detention_start_day`和`initial_custody_review_days`以建立首次羁押复核。重复保存同一命令号不会再次改写停表区间或延长期限；并发版本冲突返回409，页面会保留已填写内容。
 
 除`/health`和`/`外，请求需提供`X-User-Id`、`X-Role`，可选`X-Org`。
 

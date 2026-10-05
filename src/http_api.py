@@ -12,6 +12,8 @@ from .domain import Actor, DomainError, PermissionDenied, ValidationError
 RECORD_RE = re.compile(r"^/api/records/(\d+)$")
 ACTION_RE = re.compile(r"^/api/records/(\d+)/actions/([a-z_]+)$")
 AUDIT_RE = re.compile(r"^/api/records/(\d+)/audit$")
+JUDICIAL_ORDER_RE = re.compile(r"^/api/records/(\d+)/(?:judicial-stays|judicial_stays)$")
+CUSTODY_REVIEW_RE = re.compile(r"^/api/records/(\d+)/(?:custody-reviews|custody_reviews)/(\d+)/decision$")
 
 
 def make_handler(service: Any, static_dir: Path):
@@ -98,6 +100,28 @@ def make_handler(service: Any, static_dir: Path):
                 if parsed.path == "/api/records":
                     record = service.create(self._actor(), body.get("reference", ""), body.get("data", {}))
                     self._send(201, record)
+                    return
+                match = JUDICIAL_ORDER_RE.match(parsed.path)
+                if match:
+                    version = body.get("expected_version")
+                    if not isinstance(version, int):
+                        raise ValidationError("expected_version必须是整数")
+                    record = service.save_judicial_order(self._actor(), int(match.group(1)), version, body.get("data", {}))
+                    self._send(200, record)
+                    return
+                match = CUSTODY_REVIEW_RE.match(parsed.path)
+                if match:
+                    version = body.get("expected_version")
+                    if not isinstance(version, int):
+                        raise ValidationError("expected_version必须是整数")
+                    record = service.decide_custody_review(
+                        self._actor(),
+                        int(match.group(1)),
+                        int(match.group(2)),
+                        version,
+                        body.get("data", {}),
+                    )
+                    self._send(200, record)
                     return
                 match = ACTION_RE.match(parsed.path)
                 if match:

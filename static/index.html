@@ -6,28 +6,149 @@
   <title>移民案件期限与材料管理</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #17212b; }
-    main { max-width: 960px; margin: auto; }
+    main { max-width: 1100px; margin: auto; }
     button { padding: .55rem .9rem; cursor: pointer; }
     pre { background: #f4f6f8; padding: 1rem; overflow: auto; border-radius: 8px; }
-    .row { display: flex; gap: 1rem; align-items: center; }
+    .row { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
+    fieldset { border: 1px solid #d7dde4; border-radius: 8px; margin: 1rem 0; padding: 1rem; }
+    label { display: inline-grid; gap: .25rem; font-size: .9rem; }
+    input, select { padding: .45rem; border: 1px solid #b8c2cc; border-radius: 6px; min-width: 130px; }
+    .notice { padding: .75rem 1rem; border-radius: 8px; margin: .75rem 0; display: none; }
+    .ok { background: #e8f5e9; color: #1b5e20; }
+    .warn { background: #fff8e1; color: #7c5a00; }
+    .error { background: #ffebee; color: #8a1f1f; }
   </style>
 </head>
 <body>
 <main>
   <h1>移民案件期限与材料管理</h1>
-  <p>最小演示页。完整业务流程通过README中的JSON接口调用。</p>
-  <div class="row"><button id="load">加载记录</button><button id="stats">查看状态统计</button></div>
-  <pre id="output">点击上方按钮读取服务状态。</pre>
+  <p>案件、司法暂缓命令、办案期限和羁押复核使用同一份续作依据。填写内容在版本冲突时不会被清空。</p>
+
+  <div class="row">
+    <label>案件ID<input id="caseId" type="number" min="1" value="1"></label>
+    <button id="load">加载案件依据</button>
+    <button id="stats">查看状态统计</button>
+  </div>
+  <div id="notice" class="notice"></div>
+  <pre id="output">点击“加载案件依据”读取统一依据。</pre>
+
+  <form id="orderForm">
+    <fieldset>
+      <legend>登记司法暂缓命令</legend>
+      <div class="row">
+        <label>期望版本<input id="orderVersion" type="number" value="1"></label>
+        <label>命令号<input id="orderNumber" required placeholder="COURT-001"></label>
+        <label>命令类型<select id="orderType"><option value="stay">暂缓</option><option value="update">更新</option><option value="revoke">撤销</option></select></label>
+        <label>签发日<input id="issuedDay" type="number" value="0"></label>
+        <label>收到日<input id="receivedDay" type="number"></label>
+        <label>生效日<input id="effectiveDay" type="number"></label>
+        <label>恢复日<input id="resumeDay" type="number"></label>
+        <label>复核天数<input id="reviewDays" type="number" min="1"></label>
+        <button type="submit">保存命令</button>
+      </div>
+    </fieldset>
+  </form>
+
+  <form id="reviewForm">
+    <fieldset>
+      <legend>处理当前待决羁押复核</legend>
+      <div class="row">
+        <label>复核ID<input id="reviewId" type="number" min="1"></label>
+        <label>期望版本<input id="reviewVersion" type="number" value="1"></label>
+        <label>决定<select id="decision"><option value="continue_detention">继续羁押</option><option value="release">释放</option><option value="bond">保释</option></select></label>
+        <label>决定日<input id="decidedDay" type="number" min="0"></label>
+        <label>追加复核天数<input id="nextReviewDays" type="number" min="1"></label>
+        <label>理由<input id="decisionReason" placeholder="复核理由"></label>
+        <button type="submit">提交复核决定</button>
+      </div>
+    </fieldset>
+  </form>
 </main>
 <script>
-const headers = {"X-User-Id":"demo-admin","X-Role":"admin","X-Org":"demo"};
-async function show(path) {
-  const response = await fetch(path, {headers});
-  const data = await response.json();
-  document.getElementById("output").textContent = JSON.stringify(data, null, 2);
+const headers = {"X-User-Id":"demo-officer","X-Role":"case_officer","X-Org":"demo","Content-Type":"application/json"};
+const output = document.getElementById("output");
+const notice = document.getElementById("notice");
+const $ = (id) => document.getElementById(id);
+const intOrNull = (id) => {
+  const value = $(id).value.trim();
+  return value === "" ? null : Number(value);
+};
+function showNotice(kind, message) {
+  notice.className = "notice " + kind;
+  notice.style.display = "block";
+  notice.textContent = message;
 }
-document.getElementById("load").onclick = () => show("/api/records?limit=20");
-document.getElementById("stats").onclick = () => show("/api/stats");
+async function request(path, options = {}) {
+  const response = await fetch(path, {headers, ...options});
+  const data = await response.json();
+  if (!response.ok) {
+    const error = new Error(data.message || "请求失败");
+    error.status = response.status;
+    throw error;
+  }
+  return data;
+}
+function renderCase(data) {
+  output.textContent = JSON.stringify(data, null, 2);
+  $("orderVersion").value = data.version;
+  $("reviewVersion").value = data.version;
+  const pending = (data.custody_reviews || []).find(item => item.status === "pending");
+  if (pending) $("reviewId").value = pending.id;
+  if (data.save_result) {
+    showNotice("warn", data.save_result.warning || "命令已保存为差异或重复记录");
+  }
+}
+async function loadCase() {
+  try {
+    renderCase(await request(`/api/records/${$("caseId").value}`));
+    showNotice("ok", "已加载当前案件、命令和两套期限");
+  } catch (error) {
+    showNotice("error", error.message);
+  }
+}
+$("load").onclick = loadCase;
+$("stats").onclick = async () => {
+  output.textContent = JSON.stringify(await request("/api/stats"), null, 2);
+};
+$("orderForm").onsubmit = async (event) => {
+  event.preventDefault();
+  const payload = {
+    expected_version: Number($("orderVersion").value),
+    data: {
+      order_number: $("orderNumber").value.trim(),
+      order_type: $("orderType").value,
+      issued_day: Number($("issuedDay").value),
+      received_day: intOrNull("receivedDay"),
+      effective_day: intOrNull("effectiveDay"),
+      resume_day: intOrNull("resumeDay"),
+      review_days: intOrNull("reviewDays")
+    }
+  };
+  try {
+    renderCase(await request(`/api/records/${$("caseId").value}/judicial-stays`, {method: "POST", body: JSON.stringify(payload)}));
+    showNotice("ok", "命令处理完成");
+  } catch (error) {
+    showNotice(error.status === 409 ? "warn" : "error", error.status === 409 ? "版本冲突：表单内容已保留，请加载新版本后再提交" : error.message);
+  }
+};
+$("reviewForm").onsubmit = async (event) => {
+  event.preventDefault();
+  const payload = {
+    expected_version: Number($("reviewVersion").value),
+    data: {
+      decision: $("decision").value,
+      decision_reason: $("decisionReason").value.trim(),
+      decided_day: intOrNull("decidedDay"),
+      next_review_days: intOrNull("nextReviewDays")
+    }
+  };
+  try {
+    renderCase(await request(`/api/records/${$("caseId").value}/custody-reviews/${$("reviewId").value}/decision`, {method: "POST", body: JSON.stringify(payload)}));
+    showNotice("ok", "羁押复核已决定，历史决定依据保持不变");
+  } catch (error) {
+    showNotice(error.status === 409 ? "warn" : "error", error.status === 409 ? "版本冲突：当前填写内容已保留" : error.message);
+  }
+};
 </script>
 </body>
 </html>
