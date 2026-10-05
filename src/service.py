@@ -49,9 +49,15 @@ class Service:
         action = text({"action": action}, "action")
         if not self.rules.role_can_action(actor.role, action):
             raise PermissionDenied("角色无权执行该操作")
+        if action == "register_order":
+            return self._register_order(actor, record_id, int(expected_version), data or {})
         record = self.repository.get(record_id)
         self.rules.require_transition(record, action)
-        new_state, new_payload, summary = self.rules.apply_action(record, action, data or {})
+        if action == "decide_review":
+            new_state = record["state"]
+            new_payload, summary = self.rules.apply_review_decision(record, data or {})
+        else:
+            new_state, new_payload, summary = self.rules.apply_action(record, action, data or {})
         return self.repository.mutate(
             record_id=record_id,
             expected_version=int(expected_version),
@@ -61,6 +67,48 @@ class Service:
             action=action,
             details={"summary": summary, "input": data or {}, "from": record["state"], "to": new_state},
         )
+
+    def _register_order(self, actor: Actor, record_id: int, expected_version: int, data: Dict[str, Any]) -> Dict[str, Any]:
+        record = self.repository.get(record_id)
+        order = self.rules.validate_order(data)
+        if self.repository.get_order(record_id, order["order_no"]) is not None:
+            # 同一命令号只收一次：保存失败后的重试在此幂等返回，期限不再延长
+            self.audit.note(record_id, actor.user_id, "order_duplicate", {"order_no": order["order_no"], "summary": "重复命令已忽略，期限不再延长"})
+            return record
+        self.rules.require_transition(record, "register_order")
+        new_payload, order_row, summary = self.rules.apply_order(record, order)
+        record, applied = self.repository.mutate_with_order(
+            record_id=record_id,
+            expected_version=expected_version,
+            state=record["state"],
+            payload=new_payload,
+            actor_id=actor.user_id,
+            action="register_order",
+            details={"summary": summary, "order": order_row},
+            order=order_row,
+        )
+        if not applied:
+            self.audit.note(record_id, actor.user_id, "order_duplicate", {"order_no": order["order_no"], "summary": "重复命令已忽略，期限不再延长"})
+        return record
+
+    def basis(self, actor: Actor, record_id: int) -> Dict[str, Any]:
+        """同一份可续作依据：两套期限、停表状态、命令对账记录与复核队列。"""
+        actor = self._actor(actor)
+        self._ensure_known_role(actor)
+        record = self.repository.get(record_id)
+        p = record["payload"]
+        return {
+            "record_id": record["id"],
+            "reference": record["reference"],
+            "state": record["state"],
+            "version": record["version"],
+            "office_deadline_day": p.get("office_deadline_day", p.get("deadline_day")),
+            "custody_review_due_day": p.get("custody_review_due_day"),
+            "stayed_days": p.get("stayed_days", 0),
+            "stay": p.get("stay"),
+            "orders": self.repository.list_orders(record_id),
+            "reviews": p.get("reviews", []),
+        }
 
     def timeline(self, actor: Actor, record_id: int) -> List[Dict[str, Any]]:
         actor = self._actor(actor)

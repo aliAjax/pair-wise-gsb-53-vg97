@@ -2,7 +2,7 @@
 import json
 import sqlite3
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .domain import Conflict, NotFound
 
@@ -47,8 +47,24 @@ class Repository:
                     details TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS stay_orders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    record_id INTEGER NOT NULL REFERENCES records(id) ON DELETE CASCADE,
+                    order_no TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    kind TEXT NOT NULL,
+                    start_day INTEGER,
+                    end_day INTEGER,
+                    issued_day INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    note TEXT NOT NULL DEFAULT '',
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(record_id, order_no)
+                );
                 CREATE INDEX IF NOT EXISTS idx_records_state ON records(state);
                 CREATE INDEX IF NOT EXISTS idx_audit_record ON audit_events(record_id, id);
+                CREATE INDEX IF NOT EXISTS idx_stay_orders_record ON stay_orders(record_id, id);
                 """
             )
 
@@ -115,6 +131,50 @@ class Repository:
             result = connection.execute("SELECT * FROM records WHERE id=?", (record_id,)).fetchone()
             connection.commit()
         return self._row(result)
+
+    def mutate_with_order(self, record_id: int, expected_version: int, state: str, payload: Dict[str, Any], actor_id: str, action: str, details: Dict[str, Any], order: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
+        """命令登记与案件变更同事务落库；同一命令号只收一次，重复时直接返回现状。"""
+        now = _now()
+        applied = False
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT version FROM records WHERE id=?", (record_id,)).fetchone()
+            if row is None:
+                connection.rollback()
+                raise NotFound("记录不存在")
+            duplicate = connection.execute("SELECT id FROM stay_orders WHERE record_id=? AND order_no=?", (record_id, order["order_no"])).fetchone()
+            if duplicate is None:
+                if int(row["version"]) != int(expected_version):
+                    connection.rollback()
+                    raise Conflict("版本冲突，请刷新后重试")
+                version = int(expected_version) + 1
+                connection.execute(
+                    "INSERT INTO stay_orders(record_id,order_no,seq,kind,start_day,end_day,issued_day,status,note,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (record_id, order["order_no"], order["seq"], order["kind"], order.get("start_day"), order.get("end_day"), order["issued_day"], order["status"], order.get("note", ""), actor_id, now),
+                )
+                connection.execute(
+                    "UPDATE records SET state=?,version=?,payload=?,updated_by=?,updated_at=? WHERE id=?",
+                    (state, version, json.dumps(payload, ensure_ascii=False, sort_keys=True), actor_id, now, record_id),
+                )
+                connection.execute(
+                    "INSERT INTO audit_events(record_id,action,actor_id,version,details,created_at) VALUES(?,?,?,?,?,?)",
+                    (record_id, action, actor_id, version, json.dumps(details, ensure_ascii=False, sort_keys=True), now),
+                )
+                connection.commit()
+                applied = True
+            else:
+                connection.rollback()
+        return self.get(record_id), applied
+
+    def get_order(self, record_id: int, order_no: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM stay_orders WHERE record_id=? AND order_no=?", (record_id, order_no)).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_orders(self, record_id: int) -> List[Dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM stay_orders WHERE record_id=? ORDER BY id", (record_id,)).fetchall()
+        return [dict(row) for row in rows]
 
     def add_audit(self, record_id: int, actor_id: str, action: str, details: Dict[str, Any]) -> None:
         with self._connect() as connection:

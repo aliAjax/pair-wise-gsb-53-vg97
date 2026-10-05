@@ -9,25 +9,157 @@
     main { max-width: 960px; margin: auto; }
     button { padding: .55rem .9rem; cursor: pointer; }
     pre { background: #f4f6f8; padding: 1rem; overflow: auto; border-radius: 8px; }
-    .row { display: flex; gap: 1rem; align-items: center; }
+    fieldset { border: 1px solid #d5dde5; border-radius: 8px; margin: 1rem 0; }
+    label { display: inline-flex; flex-direction: column; font-size: .85rem; margin: .25rem .6rem .25rem 0; }
+    input, select { padding: .35rem; min-width: 6rem; }
+    .row { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
+    #banner { display: none; background: #fdecea; color: #9b1c1c; border: 1px solid #f5c6c0; padding: .6rem .9rem; border-radius: 8px; margin: 1rem 0; }
+    .hint { color: #5b6b7b; font-size: .85rem; }
   </style>
 </head>
 <body>
 <main>
   <h1>移民案件期限与材料管理</h1>
-  <p>最小演示页。完整业务流程通过README中的JSON接口调用。</p>
-  <div class="row"><button id="load">加载记录</button><button id="stats">查看状态统计</button></div>
-  <pre id="output">点击上方按钮读取服务状态。</pre>
+  <div id="banner"></div>
+  <section>
+    <h2>记录</h2>
+    <div class="row"><button id="load">加载记录</button><button id="stats">查看状态统计</button></div>
+  </section>
+  <section>
+    <h2>续作依据（两套期限 · 暂缓命令 · 羁押复核）</h2>
+    <div class="row">
+      <label>案件ID <input id="basis-id" type="number" min="1"></label>
+      <button id="basis-load">加载依据</button>
+    </div>
+    <pre id="basis-output">尚未加载。</pre>
+  </section>
+  <fieldset>
+    <legend>登记法院暂缓命令</legend>
+    <div class="row">
+      <label>案件ID <input id="order-record" type="number" min="1"></label>
+      <label>版本 <input id="order-version" type="number" min="1"></label>
+      <label>命令号 <input id="order-no" type="text" placeholder="ORD-2026-001"></label>
+      <label>命令序号 <input id="order-seq" type="number" min="0" value="1"></label>
+      <label>类型
+        <select id="order-kind">
+          <option value="issue">issue 下达</option>
+          <option value="update">update 更新</option>
+          <option value="revoke">revoke 撤销</option>
+        </select>
+      </label>
+      <label>停表开始日 <input id="order-start" type="number" min="0"></label>
+      <label>停表结束日 <input id="order-end" type="number" min="0"></label>
+      <label>签发日 <input id="order-issued" type="number" min="0" value="0"></label>
+    </div>
+    <button id="order-submit">保存命令</button>
+    <p class="hint">同一命令号只收一次，重复保存/重试不会再次顺延期限；较新命令才会改写当前停表区间，迟到的旧命令留作差异。</p>
+  </fieldset>
+  <fieldset>
+    <legend>羁押复核决定</legend>
+    <div class="row">
+      <label>案件ID <input id="review-record" type="number" min="1"></label>
+      <label>版本 <input id="review-version" type="number" min="1"></label>
+      <label>复核编号 <input id="review-id" type="number" min="1"></label>
+      <label>决定
+        <select id="review-decision">
+          <option value="custody_continued">custody_continued 继续羁押</option>
+          <option value="released">released 释放</option>
+        </select>
+      </label>
+      <label>决定日 <input id="review-day" type="number" min="0" value="0"></label>
+    </div>
+    <button id="review-submit">保存复核决定</button>
+    <p class="hint">命令更新后未决复核自动失效重算；已决定的复核保留原依据，只可对新复核作出决定。</p>
+  </fieldset>
+  <pre id="output">操作结果显示在这里。</pre>
 </main>
 <script>
 const headers = {"X-User-Id":"demo-admin","X-Role":"admin","X-Org":"demo"};
-async function show(path) {
-  const response = await fetch(path, {headers});
+const out = (id, data) => { document.getElementById(id).textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2); };
+function banner(message) {
+  const el = document.getElementById("banner");
+  el.style.display = message ? "block" : "none";
+  el.textContent = message || "";
+}
+async function api(path, options) {
+  const response = await fetch(path, options || {headers});
   const data = await response.json();
-  document.getElementById("output").textContent = JSON.stringify(data, null, 2);
+  return {status: response.status, data};
+}
+async function show(path) {
+  const {data} = await api(path);
+  out("output", data);
+}
+async function loadBasis() {
+  const id = document.getElementById("basis-id").value;
+  if (!id) return;
+  const {status, data} = await api("/api/records/" + id + "/basis");
+  if (status === 200) {
+    document.getElementById("order-record").value = id;
+    document.getElementById("review-record").value = id;
+    document.getElementById("order-version").value = data.version;
+    document.getElementById("review-version").value = data.version;
+  }
+  out("basis-output", data);
+}
+async function postAction(recordId, version, action, data) {
+  return api("/api/records/" + recordId + "/actions/" + action, {
+    method: "POST",
+    headers: Object.assign({"Content-Type": "application/json"}, headers),
+    body: JSON.stringify({expected_version: Number(version), data}),
+  });
+}
+async function submitOrder() {
+  banner("");
+  const recordId = document.getElementById("order-record").value;
+  const data = {
+    order_no: document.getElementById("order-no").value,
+    seq: Number(document.getElementById("order-seq").value),
+    kind: document.getElementById("order-kind").value,
+    issued_day: Number(document.getElementById("order-issued").value),
+  };
+  const start = document.getElementById("order-start").value;
+  const end = document.getElementById("order-end").value;
+  if (start !== "") data.start_day = Number(start);
+  if (end !== "") data.end_day = Number(end);
+  const {status, data: result} = await postAction(recordId, document.getElementById("order-version").value, "register_order", data);
+  if (status === 409) {
+    // 版本冲突：另一经办已先落库。表单内容保留，刷新版本后可原样重试。
+    banner("版本冲突：另一经办已先保存。当前填写内容已保留，请重新加载依据获取新版本后重试；同一命令号的重试会被幂等忽略，不会重复顺延。");
+    out("output", result);
+    return;
+  }
+  out("output", result);
+  if (status === 200) {
+    document.getElementById("order-version").value = result.version;
+    loadBasis();
+  }
+}
+async function submitReview() {
+  banner("");
+  const recordId = document.getElementById("review-record").value;
+  const data = {
+    review_id: Number(document.getElementById("review-id").value),
+    decision: document.getElementById("review-decision").value,
+    decided_day: Number(document.getElementById("review-day").value),
+  };
+  const {status, data: result} = await postAction(recordId, document.getElementById("review-version").value, "decide_review", data);
+  if (status === 409) {
+    banner("版本冲突或复核已失效：当前填写内容已保留，请重新加载依据确认最新复核队列。");
+    out("output", result);
+    return;
+  }
+  out("output", result);
+  if (status === 200) {
+    document.getElementById("review-version").value = result.version;
+    loadBasis();
+  }
 }
 document.getElementById("load").onclick = () => show("/api/records?limit=20");
 document.getElementById("stats").onclick = () => show("/api/stats");
+document.getElementById("basis-load").onclick = loadBasis;
+document.getElementById("order-submit").onclick = submitOrder;
+document.getElementById("review-submit").onclick = submitReview;
 </script>
 </body>
 </html>
